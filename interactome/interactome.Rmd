@@ -1,0 +1,473 @@
+---
+title: "Interactome analysis for Joshi, Watanabi et al. 2019"
+output: html_notebook
+---
+
+```{r}
+library(assertthat)
+library(Seurat)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(simpleCache)
+```
+
+```{r}
+simpleCache::setCacheDir(".cache")
+```
+
+## Load data
+Seurat v3 objects for 
+ — whole lung
+ — macrophages subset
+ — alveolar type 2 cells subset
+```{r}
+load("data/lung_SeuratV3.Robj")
+load("data/Macrophages2.Robj")
+load("data/AT2_clean.Robj")
+```
+
+Read in tables of ligands and receptors in pairs.
+Data from Skelly et. al 2018 (https://www.ncbi.nlm.nih.gov/pubmed/29346760)
+```{r}
+pairs <- read_xlsx('mmc4.xlsx', skip = 4, col_names = T)
+pairs <- pairs[pairs$ligand_symbol %in% rownames(lung), ]
+```
+
+## Preprocess data
+Remove doublet clusters and rename the rest of the clusters to human-readable cell types.
+Split the combined object by sample: TiO2 and Asbestos mice
+```{r}
+lung <- subset(lung, idents = c(30,34,37), invert = T)
+lung <- RenameIdents(
+    lung, 
+    '0'='Classical_monocytes', 
+    '1'='AT2', 
+    '2'='B_cells', 
+    '3'='T_cells', 
+    '4'='AT2', 
+    '5'='Non-classical_monocytes', 
+    '6'='TRAM', 
+    '7'='Neutrophils', 
+    '8'='TRAM', 
+    '9'='IM', 
+    '10'='NK_cells',
+    '11'='DC2', 
+    '12'='AT2', 
+    '13'='Endo_1', 
+    '14'='Club_cells', 
+    '15'='DC1', 
+    '16'='Endo_2', 
+    '17'='T_cells',
+    '18'='Neutrophils', 
+    '19'='MoAM', 
+    '20'='Ciliated_cells', 
+    '21'='AT2_Retnla',
+    '22'='Neutrophils', 
+    '23'='ILC',
+    '24'='TRAM', 
+    '25'='Proliferating_TRAM', 
+    '26'='pDC', 
+    '27'='Tregs', 
+    '28'='Fibroblasts', 
+    '29'="Ccr7_DC",
+    '31'='Mesothelium', 
+    '32'='AT1', 
+    '33'='Proliferating_DC',
+    '35'='Smooth_muscle_cells', 
+    '36'='Lymphatics', 
+    '38'='Mast_cells'
+)
+
+lung_ti <- subset(lung, cells = WhichCells(lung, expression = orig.ident == 'SC14'))
+lung_as <- subset(lung, cells = WhichCells(lung, expression = orig.ident == 'SC15'))
+```
+## Utility functions
+```{r}
+# Function to determine expression level of gene in cluster
+expressed <- function(x, cell_pops) {
+  assert_that(length(x) == length(cell_pops))
+  tapply(x, cell_pops, function(y) { mean(y > 0) })
+}
+
+# Utility function to get raw RNA counts from Seurat 3 object
+get_gene_counts <- function(obj, genes) {
+    genes <- genes[genes %in% rownames(obj)]
+    return(GetAssayData(obj, slot = "counts")[genes, ])
+}
+
+# Compute table of interactions for given ligand and receptor cluster expression values
+get_all_interactions <- function(ligands, receptors, pairs) {
+    all_ints <- expand.grid(rownames(ligands), rownames(ligands), 1:nrow(pairs))
+    levels <- t(mapply(function(x, y, z) {
+        ligand <- pairs$ligand_symbol[z]
+        receptor <- pairs$receptor_symbol[z]
+        l <- ifelse(ligand %in% colnames(ligands), ligands[x, ligand], 0)
+        r <- ifelse(receptor %in% colnames(receptors), receptors[y, receptor], 0)
+        return(c(l, r))
+    }, all_ints$Var1, all_ints$Var2, all_ints$Var3))
+    ints_expression <- as.data.frame(levels)
+    ints_expression$int_exp <- apply(levels, 1, min)
+    all_ints <- cbind(all_ints, ints_expression)
+    colnames(all_ints) <- c("ligand_cl", "receptor_cl", "lr_id", "ligand_exp", "receptor_exp", "int_exp")
+    all_ints <- all_ints[all_ints$int_exp > 0,]
+    all_ints$id <- paste0(all_ints$ligand_cl, "->", all_ints$receptor_cl, "/", all_ints$lr_id)
+    return(all_ints)
+}
+
+# Plot heatmap of number of interactions between different clusters
+# Sorts clusters automatically by descending total count
+heatmap_interactions <- function(data_name, 
+                                 int_table, 
+                                 threshold = 0.1, 
+                                 show_labels = F,
+                                 limit = NULL,
+                                 breaks = NULL) 
+{
+    int_table$ligand_cl <- droplevels(int_table$ligand_cl)
+    int_table$receptor_cl <- droplevels(int_table$receptor_cl)
+    int_table <- int_table[int_table$int_exp > threshold, ]
+    int_table_cnt <- int_table %>% group_by(ligand_cl, receptor_cl) %>% summarize(Count=n())
+    l_order <- order((int_table %>% group_by(ligand_cl) %>% summarize(Count=n()))$Count)
+    r_order <- order((int_table %>% group_by(receptor_cl) %>% summarize(Count=n()))$Count)
+    int_table_cnt$ligand_cl <- factor(
+        int_table_cnt$ligand_cl, 
+        levels = levels(int_table_cnt$ligand_cl)[l_order]
+    )
+    int_table_cnt$receptor_cl <- factor(
+        int_table_cnt$receptor_cl, 
+        levels = rev(levels(int_table_cnt$receptor_cl)[r_order])
+    )
+    levels(int_table_cnt$ligand_cl) <- gsub('_', ' ', levels(int_table_cnt$ligand_cl), fixed = TRUE)
+    levels(int_table_cnt$receptor_cl) <- gsub('_', ' ', levels(int_table_cnt$receptor_cl), fixed = TRUE)
+    if (is.null(limit)) {
+        limit <- c(0, max(int_table_cnt$Count))
+    }
+    if (is.null(breaks)) {
+        breaks  <- waiver()
+    }
+    plt <- (ggplot(data=int_table_cnt, aes(y=ligand_cl, x=receptor_cl, fill=Count))
+            + geom_tile()
+            + scale_fill_gradient(
+                low="#dddddd", 
+                high="#003366", 
+                limit=limit,
+                name="Number of\nInteractions",
+                breaks=breaks
+            )
+            + theme_minimal()
+            + theme(
+                axis.text.x = element_text(angle = 90, hjust=1, vjust=0.5, size=11),
+                axis.text.y = element_text(size=11),
+                axis.title = element_text(size=8, color="gray40")
+            )
+            + xlab("Receptor")
+            + ylab("Ligand")
+            + ggtitle(paste0(
+                "All possible interactions in ",
+                data_name,
+                "\nexpression threshold=",
+                threshold * 100,
+                "%"
+            ))
+            + coord_fixed())
+    if (show_labels) {
+        plt <- plt + geom_text(aes(label=Count), color = "white")
+    }
+    return(plt)
+}
+
+# Given two tables from `get_all_interactions` call computes the difference
+# and plots a heatmap of interaction difference
+heatmap_difference <- function(data_name_old, data_name_new, ints_old, ints_new, threshold, show_value = F) {
+    ints_old <- ints_old[ints_old$int_exp > threshold, ]
+    ints_new <- ints_new[ints_new$int_exp > threshold, ]
+    new_specific <- ints_new[!(ints_new$id %in% ints_old$id), ]
+    heatmap <- heatmap_interactions("", new_specific, threshold)
+    
+    if (show_value) {
+        heatmap <- heatmap + geom_text(aes(label=Count), color = "white")
+    }
+    
+    return(
+        heatmap
+            + ggtitle(paste0(
+                "All possible interactions in ",
+                data_name_new,
+                "\nwhich are absent in ",
+                data_name_old,
+                "\nexpression threshold=",
+                threshold * 100,
+                "%"
+            ))
+    )
+}
+
+# Renames Seurat v3 clusters by adding `orig.ident` value
+# to each cluster
+split_clusters <- function(obj) {
+    data <- FetchData(obj, c("orig.ident", "ident"))
+    
+    uniq_by <- unique(obj[["orig.ident"]])$orig.ident
+    clusters <- levels(obj)
+    for (by_value in uniq_by) {
+        for (cluster in clusters) {
+            Idents(obj, cells = rownames(
+                data[data$orig.ident == by_value & data$ident == cluster, ]
+            )) <- paste0(cluster, "_", by_value)
+        }
+    }
+    return(obj)
+}
+
+# Runs `FindMarkers` for each cluster in Seurat v3 object,
+# finding DE genes between two samples within each cluster
+compute_split_de_genes <- function(orig_obj, split_obj, genes, by = "orig.ident", threshold = 0.1) {
+    uniq_by <- unique(orig_obj[[by]])[[by]]
+    assert_that(length(uniq_by) == 2)
+    clusters <- levels(orig_obj)
+    res <- data.frame()
+    for (cluster in clusters) {
+        if (length(WhichCells(
+            split_obj, 
+            idents = c(paste0(cluster, "_", uniq_by[1]))
+        )) < 3 || length(WhichCells(
+            split_obj, 
+            idents = c(paste0(cluster, "_", uniq_by[2]))
+        )) < 3) {
+            next
+        }
+        de_genes <- FindMarkers(
+            split_obj, 
+            test = "negbinom",
+            ident.1 = paste0(cluster, "_", uniq_by[1]), 
+            ident.2 = paste0(cluster, "_", uniq_by[2]),  
+            min.pct = threshold,
+            genes.use = genes,
+            verbose = FALSE
+        )
+        de_genes <- de_genes[de_genes$p_val_adj < 0.05, ]
+        if (nrow(de_genes) > 0) {
+            de_genes$cluster <- cluster
+        }
+        res <- rbind(res, de_genes)
+    }
+    return(res)
+}
+
+# Helper function to save plots as pdf
+figure <- function(path, f) {
+  pdf(path, width = 9, height = 7)
+  f()
+  dev.off()
+}
+```
+
+## L/R analysis
+First we compute expression values for each cluster for each ligand and each receptor gene.
+Separately for TiO2 and Asbestos samples.
+```{r}
+raw_ligand_ti <- as.data.frame(as.matrix(get_gene_counts(lung_ti, pairs$ligand_symbol)))
+raw_receptor_ti <- as.data.frame(as.matrix(get_gene_counts(lung_ti, pairs$receptor_symbol)))
+
+ligand_expressed_ti <- apply(raw_ligand_ti, 1, expressed, cell_pops = Idents(lung_ti))
+receptor_expressed_ti <- apply(raw_receptor_ti, 1, expressed, cell_pops = Idents(lung_ti))
+
+raw_ligand_as <- as.data.frame(as.matrix(get_gene_counts(lung_as, pairs$ligand_symbol)))
+raw_receptor_as <- as.data.frame(as.matrix(get_gene_counts(lung_as, pairs$receptor_symbol)))
+
+ligand_expressed_as <- apply(raw_ligand_as, 1, expressed, cell_pops = Idents(lung_as))
+receptor_expressed_as <- apply(raw_receptor_as, 1, expressed, cell_pops = Idents(lung_as))
+```
+
+Then we compile that data into tables of interactions, which includes:
+ — ligand gene symbol
+ — ligand expressing cluster
+ — ligand expression value
+ — receptor gene symbol
+ — receptor expressing cluster
+ — receptor expression value
+ — interaction expression value (min of ligand and receptor expression values)
+```{r}
+all_ints_ti <- simpleCache("ti_interaction", {
+    get_all_interactions(ligand_expressed_ti, receptor_expressed_ti, pairs)
+})
+all_ints_as <- simpleCache("as_interactions", {
+    get_all_interactions(ligand_expressed_as, receptor_expressed_as, pairs)
+})
+```
+
+Then we can plot the number of interactions between clusters, taken by a threshold of 10%.
+TiO2 sample
+```{r}
+heatmap_interactions("TiO2", all_ints_ti, limit = c(0, 275), breaks = c(0, 50, 100, 150, 200, 275))
+```
+
+```{r}
+figure("results/tio2-all-interactions.pdf", function() {
+  heatmap_interactions("TiO2", all_ints_ti, limit = c(0, 275), breaks = c(0, 50, 100, 150, 200, 275))
+})
+```
+Asbestos sample
+```{r}
+heatmap_interactions("Asbestos", all_ints_as, threshold=0.1, limit = c(0, 275), breaks = c(0, 50, 100, 150, 200, 275))
+```
+
+```{r}
+figure("results/asbestos-all-interactions.pdf", function() {
+  heatmap_interactions("Asbestos", all_ints_as, threshold=0.1, limit = c(0, 275), breaks = c(0, 50, 100, 150, 200, 275))
+})
+```
+Their difference
+```{r}
+heatmap_difference("TiO2", "Asbestos", all_ints_ti, all_ints_as, 0.1)
+```
+
+```{r}
+figure("results/asbestos-specific-raw.pdf", function() {
+  heatmap_difference("TiO2", "Asbestos", all_ints_ti, all_ints_as, 0.1)
+})
+```
+## Differential expression analysis
+We split each cluster into two by sample
+```{r}
+split_lung <- split_clusters(lung)
+```
+
+```{r}
+interacting_genes <- c(pairs$ligand_symbol, pairs$receptor_symbol)
+```
+
+And compute the DE genes between samples within each cluster
+```{r}
+all_de_genes <- simpleCache("all_de_genes", {
+    compute_split_de_genes(lung, split_lung, interacting_genes)
+})
+```
+
+Next we select ligands and receptors from DE gene list
+```{r}
+l_c <- all_de_genes[rownames(all_de_genes) %in% pairs$ligand_symbol, c(6), drop = FALSE]
+r_c <- all_de_genes[rownames(all_de_genes) %in% pairs$receptor_symbol, c(6), drop = FALSE]
+```
+
+And find indices of these gene's interactions in `all_ints_as` table
+of interaction for Asbestos sample
+```{r}
+l_idx <- paste0(pairs$ligand_symbol[all_ints_as$lr_id], "/", all_ints_as$ligand_cl) %in% paste0(rownames(l_c), "/", l_c$cluster)
+r_idx <- paste0(pairs$receptor_symbol[all_ints_as$lr_id], "/", all_ints_as$receptor_cl) %in% paste0(rownames(r_c), "/", r_c$cluster)
+```
+
+Finally, we select interactions from Asbestos sample for these indices,
+cut them at 10% threshold and filter out from them any interactions
+which are present in TiO2 sample at 10% threshold
+```{r}
+as_de_ints <- all_ints_as[l_idx | r_idx, ]
+as_de_ints_0_1 <- as_de_ints[as_de_ints$int_exp > 0.1, ]
+as_de_ints_0_1 <- as_de_ints_0_1[!(as_de_ints_0_1$id %in% all_ints_ti$id[all_ints_ti$int_exp > 0.1]), ]
+```
+
+```{r}
+heatmap_interactions("SC15-SC14", as_de_ints_0_1) + 
+    ggtitle(paste0(
+        "Asbestos interactions, for which\n",
+        "ligand or receptor is among DE genes\n",
+        "and interaction is absent in TiO2\n",
+        "with threshold = 10%"
+    ))
+```
+
+```{r}
+figure("results/asbestos-specific-de.pdf", function() {
+  heatmap_interactions("SC15-SC14", as_de_ints_0_1) + 
+      ggtitle(paste0(
+          "Asbestos interactions, for which\n",
+          "ligand or receptor is among DE genes\n",
+          "and interaction is absent in TiO2\n",
+          "with threshold = 10%"
+      ))
+})
+```
+
+```{r}
+write.csv(cbind(
+    as_de_ints_0_1, 
+    pairs[as_de_ints_0_1$lr_id, c(2, 4)]
+), "results/asbestos-specific-de.csv")
+```
+
+## Focused analysis
+We want to focus on cell types present in alveolar space.
+Also, we use more granular Macrophages annotations from separate
+Macrophages object
+```{r}
+lung_subset <- subset(lung, idents = c("TRAM", "MoAM", "AT2", "AT2_Retnla", "Fibroblasts", "IM"))
+Idents(lung_subset, cells = WhichCells(Macrophages2, ident = "AM1")) <- "AM1"
+Idents(lung_subset, cells = WhichCells(Macrophages2, ident = "AM2")) <- "AM2"
+Idents(lung_subset, cells = WhichCells(Macrophages2, ident = "AM3")) <- "AM3"
+Idents(lung_subset, cells = WhichCells(Macrophages2, ident = "IM1")) <- "IM1"
+Idents(lung_subset, cells = WhichCells(Macrophages2, ident = "IM2")) <- "IM2"
+lung_subset <- subset(lung_subset, idents = c("MoAM", "TRAM", "IM"), invert = TRUE)
+```
+
+Compute expression values for each cluster for each ligand and receptor gene
+```{r}
+raw_ligand_subset <- as.data.frame(as.matrix(get_gene_counts(lung_subset, pairs$ligand_symbol)))
+raw_receptor_subset <- as.data.frame(as.matrix(get_gene_counts(lung_subset, pairs$receptor_symbol)))
+
+ligand_expressed_subset <- apply(raw_ligand_subset, 1, expressed, cell_pops = Idents(lung_subset))
+receptor_expressed_subset <- apply(raw_receptor_subset, 1, expressed, cell_pops = Idents(lung_subset))
+```
+
+Compute the table of interactions
+```{r}
+all_ints_subset <- simpleCache("subset_interactions", {
+    get_all_interactions(ligand_expressed_subset, receptor_expressed_subset, pairs)
+})
+```
+
+```{r}
+heatmap_interactions("Alveolar space", all_ints_subset, show_labels = T, threshold = .1)
+```
+
+Save figures of interactions count for thresholds at 10%, 5% and 1%
+```{r}
+figure("results/combined-focused.pdf", function() {
+  heatmap_interactions("Alveolar space", all_ints_subset, show_labels = T, threshold = .1)
+})
+figure("results/combined-focused-5pct.pdf", function() {
+  heatmap_interactions("Alveolar space", all_ints_subset, show_labels = T, threshold = .05)
+})
+figure("results/combined-focused-1pct.pdf", function() {
+  heatmap_interactions("Alveolar space", all_ints_subset, show_labels = T, threshold = .01)
+})
+```
+
+And the corresponding tables of interactions themselves
+```{r}
+all_ints_subset_01 <- all_ints_subset[all_ints_subset$int_exp > .1, ]
+write.csv(cbind(
+    all_ints_subset_01,
+    pairs[all_ints_subset_01$lr_id, c(2, 4)]
+), "results/combined-focused.csv")
+```
+
+```{r}
+all_ints_subset_005 <- all_ints_subset[all_ints_subset$int_exp > .05, ]
+write.csv(cbind(
+    all_ints_subset_005,
+    pairs[all_ints_subset_005$lr_id, c(2, 4)]
+), "results/combined-focused-5pct.csv")
+```
+
+```{r}
+all_ints_subset_001 <- all_ints_subset[all_ints_subset$int_exp > .01, ]
+write.csv(cbind(
+    all_ints_subset_001,
+    pairs[all_ints_subset_001$lr_id, c(2, 4)]
+), "results/combined-focused-1pct.csv")
+```
+
+
+
+
