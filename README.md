@@ -2,4 +2,4 @@ This repository contains code used for analysis of the single-cell RNA-seq data 
 
 1. Joshi_Watanabe_ERJ_2019_asbestos.R - R code to analyse the asbestos dataset. 
 2. Joshi_Watanabe_ERJ_2019_bleomycin.R - R code to analyse the bleomycin dataset from Xie et al. 2019. 
-3. Interactome - code to analyse ligand/receptror interactions in asbestos dataset. 
+3. Interactome - code to analyse ligand-receptor interactions in the asbestos dataset. 
