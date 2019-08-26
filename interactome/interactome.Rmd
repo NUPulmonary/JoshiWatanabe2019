@@ -255,6 +255,16 @@ compute_split_de_genes <- function(orig_obj, split_obj, genes, by = "orig.ident"
     return(res)
 }
 
+# Subsets from `full_ints` interaction table to the interactions
+# involving any of the genes in `de_genes` differentially expressed table
+get_de_interactions <- function(de_genes, full_ints, pairs) {
+    l_c <- de_genes[rownames(de_genes) %in% pairs$ligand_symbol, c(6), drop = FALSE]
+    r_c <- de_genes[rownames(de_genes) %in% pairs$receptor_symbol, c(6), drop = FALSE]
+    l_idx <- paste0(pairs$ligand_symbol[full_ints$lr_id], "/", full_ints$ligand_cl) %in% paste0(rownames(l_c), "/", l_c$cluster)
+    r_idx <- paste0(pairs$receptor_symbol[full_ints$lr_id], "/", full_ints$receptor_cl) %in% paste0(rownames(r_c), "/", r_c$cluster)
+    return(full_ints[l_idx | r_idx, ])
+}
+
 # Helper function to save plots as pdf
 figure <- function(path, f) {
   pdf(path, width = 9, height = 7)
@@ -345,55 +355,62 @@ all_de_genes <- simpleCache("all_de_genes", {
 })
 ```
 
-Next we select ligands and receptors from DE gene list
+Next we select interactions from Asbestos sample where ligand or receptor
+gene is among the DE genes
 ```{r}
-l_c <- all_de_genes[rownames(all_de_genes) %in% pairs$ligand_symbol, c(6), drop = FALSE]
-r_c <- all_de_genes[rownames(all_de_genes) %in% pairs$receptor_symbol, c(6), drop = FALSE]
+as_de_ints <- get_de_interactions(all_de_genes, all_ints_as, pairs)
 ```
 
-And find indices of these gene's interactions in `all_ints_as` table
-of interaction for Asbestos sample
+And look at the difference in interactions at 10%, 5% and 1% expression thresholds
 ```{r}
-l_idx <- paste0(pairs$ligand_symbol[all_ints_as$lr_id], "/", all_ints_as$ligand_cl) %in% paste0(rownames(l_c), "/", l_c$cluster)
-r_idx <- paste0(pairs$receptor_symbol[all_ints_as$lr_id], "/", all_ints_as$receptor_cl) %in% paste0(rownames(r_c), "/", r_c$cluster)
-```
-
-Finally, we select interactions from Asbestos sample for these indices,
-cut them at 10% threshold and filter out from them any interactions
-which are present in TiO2 sample at 10% threshold
-```{r}
-as_de_ints <- all_ints_as[l_idx | r_idx, ]
-as_de_ints_0_1 <- as_de_ints[as_de_ints$int_exp > 0.1, ]
-as_de_ints_0_1 <- as_de_ints_0_1[!(as_de_ints_0_1$id %in% all_ints_ti$id[all_ints_ti$int_exp > 0.1]), ]
-```
-
-```{r}
-heatmap_interactions("SC15-SC14", as_de_ints_0_1) + 
-    ggtitle(paste0(
-        "Asbestos interactions, for which\n",
-        "ligand or receptor is among DE genes\n",
-        "and interaction is absent in TiO2\n",
-        "with threshold = 10%"
-    ))
+heatmap_difference("TiO2", "Asbestos", all_ints_ti, as_de_ints, 0.1)
 ```
 
 ```{r}
 figure("results/asbestos-specific-de.pdf", function() {
-  heatmap_interactions("SC15-SC14", as_de_ints_0_1) + 
-      ggtitle(paste0(
-          "Asbestos interactions, for which\n",
-          "ligand or receptor is among DE genes\n",
-          "and interaction is absent in TiO2\n",
-          "with threshold = 10%"
-      ))
+  heatmap_difference("TiO2", "Asbestos", all_ints_ti, as_de_ints, 0.1)
 })
 ```
 
 ```{r}
+figure("results/asbestos-specific-de-5pct.pdf", function() {
+  heatmap_difference("TiO2", "Asbestos", all_ints_ti, as_de_ints, 0.05)
+})
+```
+
+```{r}
+figure("results/asbestos-specific-de-1pct.pdf", function() {
+  heatmap_difference("TiO2", "Asbestos", all_ints_ti, as_de_ints, 0.01)
+})
+```
+
+
+
+```{r}
+as_de_ints_10 <- as_de_ints[as_de_ints$int_exp > 0.1, ]
+as_de_ints_10 <- as_de_ints_10[!(as_de_ints_10$id %in% all_ints_ti$id[all_ints_ti$int_exp > 0.1]), ]
 write.csv(cbind(
-    as_de_ints_0_1, 
-    pairs[as_de_ints_0_1$lr_id, c(2, 4)]
+    as_de_ints_10, 
+    pairs[as_de_ints_10$lr_id, c(2, 4)]
 ), "results/asbestos-specific-de.csv")
+```
+
+```{r}
+as_de_ints_05 <- as_de_ints[as_de_ints$int_exp > 0.1, ]
+as_de_ints_05 <- as_de_ints_05[!(as_de_ints_05$id %in% all_ints_ti$id[all_ints_ti$int_exp > 0.1]), ]
+write.csv(cbind(
+    as_de_ints_05, 
+    pairs[as_de_ints_05$lr_id, c(2, 4)]
+), "results/asbestos-specific-de-5pct.csv")
+```
+
+```{r}
+as_de_ints_01 <- as_de_ints[as_de_ints$int_exp > 0.1, ]
+as_de_ints_01 <- as_de_ints_01[!(as_de_ints_01$id %in% all_ints_ti$id[all_ints_ti$int_exp > 0.1]), ]
+write.csv(cbind(
+    as_de_ints_01, 
+    pairs[as_de_ints_01$lr_id, c(2, 4)]
+), "results/asbestos-specific-de-1pct.csv")
 ```
 
 ## Focused analysis
