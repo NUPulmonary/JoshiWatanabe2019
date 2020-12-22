@@ -148,7 +148,7 @@ save(lung, file = "lung_clean.Robj")
 
 #Macrophages----
 #Explore macrophage subsets using integration workflow in Seurat V3 (https://satijalab.org/seurat/v3.0/pancreas_integration_label_transfer.html)
-Macrophages <- subset(lung, idents = c(6,8,9,19,24))
+Macrophages <- subset(lung, idents = c("TRAM","IM","MoAM"))
 DimPlot(object = Macrophages, label = TRUE) + NoLegend()
 Macrophages.list <- SplitObject(Macrophages, split.by = "orig.ident")
 
@@ -288,7 +288,7 @@ DotPlot(lung, features = c("Csf1", "Il34"),
 FeaturePlot(object = Macrophages2, features = c("Pdgfa"), order = T, pt.size = 1.5) + NoLegend() #Figure 5B
 
 #AT2 cells, Figure 7 ----
-AT2 <- subset(lung, idents = c(1,4,12,21))
+AT2 <- subset(lung, idents = c("AT2", "AT2_Retnla"))
 DimPlot(object = AT2, label = TRUE) + NoLegend()
 DefaultAssay(AT2)
 
